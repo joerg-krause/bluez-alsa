@@ -288,7 +288,7 @@ static void set_transport_volume(int ba_fd, snd_mixer_elem_t *elem,
 	int i;
 
 	alsa_vol = get_normalized_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT);
-	volume = lrint(127.*alsa_vol);
+	volume = (alsa_vol == 0) ? 0 : lrint(128. * alsa_vol) - 1;
 
 	if ((flag) || (volume != transport_volume))
 		bluealsa_set_transport_volume(ba_fd, t, 0, volume, 0, volume);
@@ -516,9 +516,17 @@ static void *pcm_worker_routine(void *arg) {
 					goto fail;
 				}
 				if (t.ch1_volume != transport_volume) {
-					alsa_vol = get_normalized_playback_volume(w->melem, SND_MIXER_SCHN_FRONT_LEFT);
-					delta = t.ch1_volume - lrint(127.*alsa_vol);
-					set_normalized_playback_volume(w->melem, alsa_vol + delta/127., delta);
+					debug("ch1: %d, transport vol: %d", t.ch1_volume, transport_volume);
+					if (t.ch1_volume == 0) {
+						set_normalized_playback_volume(w->melem, 0, 0);
+					}
+					else {
+						alsa_vol = get_normalized_playback_volume(w->melem, SND_MIXER_SCHN_FRONT_LEFT);
+						delta = t.ch1_volume - lrint(128. * alsa_vol) + 1;
+						alsa_vol += delta / 128.;
+						debug("delta=%d, new alsa vol=%f", delta, alsa_vol);
+						set_normalized_playback_volume(w->melem, alsa_vol, delta);
+					}
 				}
 			}
 			w->transport_volume_updated = false;

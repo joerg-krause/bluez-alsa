@@ -31,9 +31,12 @@
  */
 
 #define _GNU_SOURCE /* exp10() */
+
 #include <math.h>
 #include <stdbool.h>
+
 #include "volume_mapping.h"
+#include "shared/log.h"
 
 #ifdef __UCLIBC__
 /* 10^x = 10^(log e^x) = (e^x)^log10 = e^(x * log 10) */
@@ -102,7 +105,12 @@ static double get_normalized_volume(snd_mixer_elem_t *elem,
 		if (err < 0)
 			return 0;
 
-		return (value - min) / (double)(max - min);
+		normalized = (value == 0)
+			? 0
+			: (value + 1 - min) / (double)(max - min + 1);
+
+		debug("normalized volume: %f", normalized);
+		return normalized;
 	}
 
 	err = get_dB[ctl_dir](elem, channel, &value);
@@ -136,7 +144,10 @@ static int set_normalized_volume(snd_mixer_elem_t *elem,
 		if (err < 0)
 			return err;
 
-		value = lrint_dir(volume * (max - min), dir) + min;
+		value = (volume == 0)
+			? 0
+			: lrint_dir(volume * (max - min + 1), dir) + min - 1;
+
 		return set_raw[ctl_dir](elem, value);
 	}
 
