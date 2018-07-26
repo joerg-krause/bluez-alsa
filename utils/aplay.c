@@ -905,6 +905,13 @@ fail:
 	status = EXIT_FAILURE;
 
 success:
+	debug("Exit, stopping %d workers", workers_count);
+	for (i = workers_count; i > 0; i--) {
+		struct pcm_worker *worker = &workers[i - 1];
+		pthread_cancel(worker->thread);
+		pthread_join(worker->thread, NULL);
+	}
+
 	if (ba_fd != -1)
 		close(ba_fd);
 	if (ba_event_fd != -1)
