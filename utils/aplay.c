@@ -13,6 +13,7 @@
 #endif
 
 #include <getopt.h>
+#include <math.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -29,6 +30,7 @@
 #include "shared/defs.h"
 #include "shared/ffb.h"
 #include "shared/log.h"
+#include "volume_mapping.h"
 
 struct pcm_worker {
 	struct ba_msg_transport transport;
@@ -39,21 +41,33 @@ struct pcm_worker {
 	int pcm_fd;
 	/* opened playback PCM device */
 	snd_pcm_t *pcm;
+	/* mixer pointer */
+	snd_mixer_elem_t *melem;
 	/* if true, worker is marked for eviction */
 	bool eviction;
 	/* if true, playback is active */
 	bool active;
+        /* if true, transport volume has been changed */
+	bool transport_volume_updated;
 	/* human-readable BT address */
 	char addr[18];
 };
 
+struct melem_private {
+	int ba_fd;
+	struct ba_msg_transport *transports;
+};
+
+static snd_mixer_t *mixer = NULL;
 static unsigned int verbose = 0;
 static const char *device = "default";
 static const char *ba_interface = "hci0";
+static const char *volume_control = NULL;
 static unsigned int pcm_buffer_time = 500000;
 static unsigned int pcm_period_time = 100000;
 static enum ba_pcm_type ba_type = BA_PCM_TYPE_A2DP;
 static bool pcm_mixer = true;
+static int transport_volume = -1;
 
 static GDBusConnection *dbus = NULL;
 
@@ -267,6 +281,21 @@ final:
 	return ret;
 }
 
+static void set_transport_volume(int ba_fd, snd_mixer_elem_t *elem,
+               const struct ba_msg_transport *t, int flag) {
+	double alsa_vol;
+	int volume;
+	int i;
+
+	alsa_vol = get_normalized_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT);
+	volume = lrint(127.*alsa_vol);
+
+	if ((flag) || (volume != transport_volume))
+		bluealsa_set_transport_volume(ba_fd, t, 0, volume, 0, volume);
+
+	transport_volume = volume;
+}
+
 static void pcm_worker_routine_exit(struct pcm_worker *worker) {
 	if (worker->pcm_fd != -1) {
 		bluealsa_close_transport(worker->ba_fd, &worker->transport);
@@ -327,20 +356,43 @@ static void *pcm_worker_routine(void *arg) {
 	size_t pause_counter = 0;
 	size_t pause_bytes = 0;
 
-	struct pollfd pfds[] = {{ w->pcm_fd, POLLIN, 0 }};
+	struct melem_private mpriv;
+	int npfds = 0;
+	struct pollfd *pfds;
 	int timeout = -1;
+
+	if (mixer && w->melem) {
+		snd_mixer_elem_set_callback_private(w->melem, &mpriv);
+		npfds = snd_mixer_poll_descriptors_count(mixer);
+	}
+
+	if ((pfds = calloc(npfds + 1, sizeof(*pfds))) == NULL) {
+		error("Calloc for poll descriptors failed: %s", strerror(errno));
+		goto fail;
+	}
 
 	debug("Starting PCM loop");
 	while (main_loop_on) {
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 
+		struct ba_msg_transport *transports;
+		unsigned short revents;
 		ssize_t ret;
+
+		pfds[0].fd = w->pcm_fd;
+		pfds[0].events = POLLIN;
+		pfds[0].revents = 0;
+
+		if (mixer && npfds > 0) {
+			if ((ret = snd_mixer_poll_descriptors(mixer, &pfds[1], npfds)) < 0)
+				error("Cannot get poll descriptors: %d\n", ret);
+		}
 
 		/* Reading from the FIFO won't block unless there is an open connection
 		 * on the writing side. However, the server does not open PCM FIFO until
 		 * a transport is created. With the A2DP, the transport is created when
 		 * some clients (BT device) requests audio transfer. */
-		switch (poll(pfds, ARRAYSIZE(pfds), timeout)) {
+		switch (poll(pfds, npfds + 1, timeout)) {
 		case -1:
 			if (errno == EINTR)
 				continue;
@@ -357,6 +409,22 @@ static void *pcm_worker_routine(void *arg) {
 			w->active = false;
 			timeout = -1;
 			continue;
+		}
+
+		if (mixer && npfds > 0) {
+			ret = snd_mixer_poll_descriptors_revents(mixer, &pfds[1], npfds, &revents);
+			if (ret < 0) {
+				error("snd_mixer_poll_descriptors_revents error: %d\n", ret);
+				goto fail;
+			}
+			if (revents & POLLIN) {
+				if ((ret = bluealsa_get_transports(w->ba_fd, &transports)) == -1) {
+					error("Couldn't get transports: %s", strerror(errno));
+				}
+				mpriv.ba_fd = w->ba_fd;
+				mpriv.transports = transports;
+				snd_mixer_handle_events(mixer);
+			}
 		}
 
 		/* FIFO has been terminated on the writing side */
@@ -429,11 +497,32 @@ static void *pcm_worker_routine(void *arg) {
 						w->transport.sampling, w->transport.channels);
 			}
 
+			if ((w->transport.type == BA_PCM_TYPE_A2DP) && (w->melem))
+				set_transport_volume(w->ba_fd, w->melem, &w->transport, 1);
+
 		}
 
 		/* mark device as active and set timeout to 500ms */
 		w->active = true;
 		timeout = 500;
+
+		if (w->transport_volume_updated) {
+			if ((w->transport.type == BA_PCM_TYPE_A2DP) && (w->melem)) {
+				struct ba_msg_transport t;
+				double alsa_vol;
+				int delta;
+				if (bluealsa_get_transport(w->ba_fd, w->transport.addr, w->transport.type, w->transport.stream, &t) == -1) {
+					error("Couldn't get BlueALSA transport: %s", strerror(errno));
+					goto fail;
+				}
+				if (t.ch1_volume != transport_volume) {
+					alsa_vol = get_normalized_playback_volume(w->melem, SND_MIXER_SCHN_FRONT_LEFT);
+					delta = t.ch1_volume - lrint(127.*alsa_vol);
+					set_normalized_playback_volume(w->melem, alsa_vol + delta/127., delta);
+				}
+			}
+			w->transport_volume_updated = false;
+		}
 
 		/* calculate the overall number of frames in the buffer */
 		ffb_seek(&buffer, ret / sizeof(*buffer.data));
@@ -464,6 +553,52 @@ fail:
 	return NULL;
 }
 
+static int melem_event(snd_mixer_elem_t *elem, unsigned int mask) {
+	struct melem_private *mpriv = snd_mixer_elem_get_callback_private(elem);
+	struct ba_msg_transport *t;
+	int i;
+	for (i = 0; i < workers_count; i++) {
+		t = &mpriv->transports[i];
+		if (t->type == BA_PCM_TYPE_A2DP)
+			set_transport_volume(mpriv->ba_fd, elem, t, 0);
+	}
+	return 0;
+}
+
+static snd_mixer_elem_t* init_mixer_control(snd_mixer_t **handle, const char *device, const char *name)
+{
+	snd_mixer_elem_t *elem = NULL;
+	int err;
+	if ((err = snd_mixer_open(handle, 0)) < 0) {
+		error("Mixer open error: %s", snd_strerror(err));
+		goto fail;
+	}
+	if ((err = snd_mixer_attach(*handle, device)) < 0) {
+		error("Mixer attach %s error: %s", device, snd_strerror(err));
+		snd_mixer_close(*handle);
+		goto fail;
+	}
+	if ((err = snd_mixer_selem_register(*handle, NULL, NULL)) < 0) {
+		error("Mixer register error: %s", snd_strerror(err));
+		snd_mixer_close(*handle);
+		goto fail;
+	}
+	if ((err = snd_mixer_load(*handle)) < 0) {
+		error("Mixer %s load error: %s", device, snd_strerror(err));
+		snd_mixer_close(*handle);
+		goto fail;
+	}
+	for (elem = snd_mixer_first_elem(*handle); elem; elem = snd_mixer_elem_next(elem)) {
+		if (!strcmp(snd_mixer_selem_get_name(elem), name))
+			break;
+	}
+	snd_mixer_elem_set_callback(elem, melem_event);
+	if (elem)
+		debug("Mixer Control Element Name: %s", snd_mixer_selem_get_name(elem));
+ fail:
+	return elem;
+}
+
 int main(int argc, char *argv[]) {
 
 	int opt;
@@ -479,6 +614,7 @@ int main(int argc, char *argv[]) {
 		{ "profile-a2dp", no_argument, NULL, 1 },
 		{ "profile-sco", no_argument, NULL, 2 },
 		{ "single-audio", no_argument, NULL, 5 },
+		{ "volume-control", required_argument, NULL, 6},
 		{ 0, 0, 0, 0 },
 	};
 
@@ -499,6 +635,7 @@ usage:
 					"  --profile-a2dp\tuse A2DP profile\n"
 					"  --profile-sco\t\tuse SCO profile\n"
 					"  --single-audio\tsingle audio mode\n"
+					"  --volume-control\talsa volume control to use\n"
 					"\nNote:\n"
 					"If one wants to receive audio from more than one Bluetooth device, it is\n"
 					"possible to specify more than one MAC address. By specifying any/empty MAC\n"
@@ -523,7 +660,7 @@ usage:
 			break;
 
 		case 1 /* --profile-a2dp */ :
-			ba_type = BA_PCM_TYPE_A2DP;
+			pcm_mixer = BA_PCM_TYPE_A2DP;
 			break;
 		case 2 /* --profile-sco */ :
 			ba_type = BA_PCM_TYPE_SCO;
@@ -538,6 +675,10 @@ usage:
 
 		case 5 /* --single-audio */ :
 			pcm_mixer = false;
+			break;
+
+		case 6 /* --volume-control */ :
+			volume_control = optarg;
 			break;
 
 		default:
@@ -612,9 +753,16 @@ usage:
 		goto fail;
 	}
 
-	if (bluealsa_subscribe(ba_event_fd, BA_EVENT_TRANSPORT_ADDED | BA_EVENT_TRANSPORT_REMOVED) == -1) {
+	if (bluealsa_subscribe(ba_event_fd, BA_EVENT_TRANSPORT_ADDED |
+					    BA_EVENT_TRANSPORT_REMOVED |
+					    BA_EVENT_TRANSPORT_VOLUME_UPDATE) == -1) {
 		error("BlueALSA subscription failed: %s", strerror(errno));
 		goto fail;
+	}
+
+	snd_mixer_elem_t *melem = NULL;
+	if (volume_control) {
+		melem = init_mixer_control(&mixer, device, volume_control);
 	}
 
 	struct sigaction sigact = { .sa_handler = main_loop_stop };
@@ -640,6 +788,14 @@ usage:
 		if (ret != sizeof(event)) {
 			error("Couldn't read event: %s", strerror(ret == -1 ? errno : EBADMSG));
 			goto fail;
+		}
+
+		if (event.mask & BA_EVENT_TRANSPORT_VOLUME_UPDATE) {
+			for (i = 0; i < workers_count; i++)
+				workers[i].transport_volume_updated = true;
+			/* No other events */
+			if (event.mask == BA_EVENT_TRANSPORT_VOLUME_UPDATE)
+				continue;
 		}
 
 init:
@@ -704,9 +860,11 @@ init:
 				ba2str(&worker->transport.addr, worker->addr);
 				worker->eviction = false;
 				worker->active = false;
+				worker->transport_volume_updated = false;
 				worker->pcm_fd = -1;
 				worker->ba_fd = -1;
 				worker->pcm = NULL;
+				worker->melem = melem;
 
 				debug("Creating PCM worker %s", worker->addr);
 
