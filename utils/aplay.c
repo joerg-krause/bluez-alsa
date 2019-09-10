@@ -1003,5 +1003,12 @@ usage:
 
 	}
 
+	debug("Exit, stopping %d workers", workers_count);
+	for (i = workers_count; i > 0; i--) {
+		struct pcm_worker *worker = &workers[i - 1];
+		pthread_cancel(worker->thread);
+		pthread_join(worker->thread, NULL);
+	}
+
 	return EXIT_SUCCESS;
 }
