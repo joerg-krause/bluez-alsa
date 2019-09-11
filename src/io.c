@@ -32,7 +32,7 @@
 # define AACENCODER_LIB_VERSION LIB_VERSION( \
 		AACENCODER_LIB_VL0, AACENCODER_LIB_VL1, AACENCODER_LIB_VL2)
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 # include <openaptx.h>
 #endif
 #if ENABLE_MP3LAME
@@ -91,7 +91,7 @@ static void io_thread_scale_pcm(const struct ba_transport *t, int16_t *buffer,
 
 /**
  * Read PCM signal from the transport PCM FIFO. */
-static ssize_t io_thread_read_pcm(struct ba_pcm *pcm, int16_t *buffer, size_t samples) {
+static ssize_t io_thread_read_pcm(struct ba_transport_pcm *pcm, int16_t *buffer, size_t samples) {
 
 	ssize_t ret;
 
@@ -119,7 +119,7 @@ static ssize_t io_thread_read_pcm(struct ba_pcm *pcm, int16_t *buffer, size_t sa
 
 /**
  * Flush read buffer of the transport PCM FIFO. */
-static ssize_t io_thread_read_pcm_flush(struct ba_pcm *pcm) {
+static ssize_t io_thread_read_pcm_flush(struct ba_transport_pcm *pcm) {
 	ssize_t rv = splice(pcm->fd, NULL, config.null_fd, NULL, 1024 * 32, SPLICE_F_NONBLOCK);
 	if (rv == -1 && errno == EAGAIN)
 		rv = 0;
@@ -132,11 +132,10 @@ static ssize_t io_thread_read_pcm_flush(struct ba_pcm *pcm) {
  *
  * Note:
  * This function temporally re-enables thread cancellation! */
-static ssize_t io_thread_write_pcm(struct ba_pcm *pcm, const int16_t *buffer, size_t samples) {
+static ssize_t io_thread_write_pcm(struct ba_transport_pcm *pcm, const int16_t *buffer, size_t len, size_t samples) {
 
 	struct pollfd pfd = { pcm->fd, POLLOUT, 0 };
 	const uint8_t *head = (uint8_t *)buffer;
-	size_t len = samples * sizeof(int16_t);
 	int oldstate;
 	ssize_t ret;
 
@@ -384,7 +383,7 @@ static void *io_thread_a2dp_sink_sbc(void *arg) {
 			const size_t samples = decoded / sizeof(int16_t);
 			if (!config.a2dp.volume)
 				io_thread_scale_pcm(t, pcm.data, samples, channels);
-			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples) == -1)
+			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, decoded, samples) == -1)
 				error("FIFO write error: %s", strerror(errno));
 
 		}
@@ -784,7 +783,7 @@ decode:
 			continue;
 		}
 
-		if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, len / sizeof(int16_t)) == -1)
+		if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, len, len / sizeof(int16_t)) == -1)
 			error("FIFO write error: %s", strerror(errno));
 
 #else
@@ -799,7 +798,7 @@ decode:
 		}
 
 		if (channels == 1) {
-			if (io_thread_write_pcm(&t->a2dp.pcm, pcm_l, samples) == -1)
+			if (io_thread_write_pcm(&t->a2dp.pcm, pcm_l, samples * sizeof(int16_t), samples) == -1)
 				error("FIFO write error: %s", strerror(errno));
 		}
 		else {
@@ -810,7 +809,7 @@ decode:
 				pcm.data[i * 2 + 1] = pcm_r[i];
 			}
 
-			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples) == -1)
+			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples * sizeof(int16_t), samples) == -1)
 				error("FIFO write error: %s", strerror(errno));
 
 		}
@@ -1297,7 +1296,7 @@ static void *io_thread_a2dp_sink_aac(void *arg) {
 			const size_t samples = aacinf->frameSize * aacinf->numChannels;
 			if (!config.a2dp.volume)
 				io_thread_scale_pcm(t, pcm.data, samples, channels);
-			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples) == -1)
+			if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples * sizeof(int16_t), samples) == -1)
 				error("FIFO write error: %s", strerror(errno));
 		}
 
@@ -1807,6 +1806,178 @@ fail_ffb:
 	pthread_cleanup_pop(1);
 fail_init:
 	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+	return NULL;
+}
+#endif
+
+#if ENABLE_APTX_DEC
+static void *io_thread_a2dp_sink_aptx(void *arg) {
+	struct ba_transport *t = (struct ba_transport *)arg;
+
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup), t);
+
+	struct io_thread_data io = {
+		.fds[0] = { t->sig_fd[0], POLLIN, 0 },
+		.fds[1] = { -1, POLLIN, 0 },
+		.t_locked = !ba_transport_pthread_cleanup_lock(t),
+	};
+
+	if (t->bt_fd == -1) {
+		error("Invalid BT socket: %d", t->bt_fd);
+		goto fail_init;
+	}
+	if (t->mtu_read <= 0) {
+		error("Invalid reading MTU: %zu", t->mtu_read);
+		goto fail_init;
+	}
+
+
+	int hd;
+	struct aptx_context *ctx;
+
+	hd = 0;
+	if ((ctx = aptx_init(hd)) == NULL) {
+		error("Couldn't initialize APTX decoder");
+		goto fail_init;
+	}
+
+	pthread_cleanup_push(PTHREAD_CLEANUP(aptx_finish), ctx);
+
+	ffb_uint8_t bt = { 0 };
+	ffb_int16_t pcm = { 0 };
+	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_uint8_free), &bt);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_int16_free), &pcm);
+
+	if (ffb_init(&pcm, 512*8*3*2*4*6/4) == NULL ||
+			ffb_init(&bt, 512*8*6) == NULL) {
+		error("Couldn't create data buffers: %s", strerror(ENOMEM));
+		goto fail_ffb;
+	}
+
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup_lock), t);
+
+	ba_transport_pthread_cleanup_unlock(t);
+	io.t_locked = false;
+
+	debug("Starting IO loop: %s", ba_transport_type_to_string(t->type));
+
+	const size_t sample_size = 8 * 4;
+	size_t process_size;
+	size_t offset = 0;
+	ssize_t processed;
+	size_t written = 0;
+	unsigned int failed = 0;
+	ssize_t length = 0;
+	ssize_t len;
+	for (;;) {
+		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+		/* add BT socket to the poll if transport is active */
+		io.fds[1].fd = t->state == TRANSPORT_ACTIVE ? t->bt_fd : -1;
+
+		if (poll(io.fds, ARRAYSIZE(io.fds), -1) == -1) {
+			if (errno == EINTR)
+				continue;
+			error("Transport poll error: %s", strerror(errno));
+			goto fail;
+		}
+
+		if (io.fds[0].revents & POLLIN) {
+			/* dispatch incoming event */
+			ba_transport_recv_signal(t);
+			continue;
+		}
+
+		if ((len = read(io.fds[1].fd, bt.tail, ffb_len_in(&bt))) == -1) {
+			debug("BT read error: %s", strerror(errno));
+			continue;
+		}
+		length += len;
+
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+
+		while (length > 0) {
+			/* For decoding we need at least eight samples for synchronization */
+			if (length < sample_size) {
+				if (length > 0) {
+					memmove(bt.data, bt.data + offset, length);
+					bt.tail = bt.data + length;
+				}
+				break;
+			}
+
+			process_size = length;
+
+			/* Always process multiple of the 8 samples (except last) for synchronization support */
+			if (length >= sample_size) {
+				process_size -= process_size % sample_size;
+			}
+
+			/* When decoding previous samples failed, reset internal state, predictor and state of the synchronization parity */
+			if (failed > 0)
+				aptx_reset(ctx);
+
+			processed = aptx_decode(ctx, bt.data + offset, process_size,
+						     (unsigned char *)pcm.data, ffb_blen_in(&pcm), &written);
+
+			if (processed > sample_size && failed > 0) {
+				debug("Synchronization successful, dropped %u samples", failed);
+				failed = 0;
+			}
+
+			/* If we have not decoded all supplied samples then decoding failed */
+			if (processed != process_size) {
+				if (failed == 0) {
+					if (length < sample_size)
+						debug("aptX decoding stopped in the middle of the sample, dropped %u samples", (unsigned int)(length - processed));
+					else
+						debug("aptX decoding failed, trying to synchronize ...");
+				}
+				if (length >= sample_size)
+					failed++;
+				else if (failed > 0)
+					failed += length;
+				if (processed <= sample_size) {
+					/* If we have not decoded at least 8 samples (with proper parity check)
+					 * drop decoded buffer and try decoding again on next byte */
+					processed = 1;
+					written = 0;
+				}
+			}
+
+			if (written > 0) {
+				#define BYTES_S24_3LE 3
+				const size_t samples = written / BYTES_S24_3LE;
+				if (io_thread_write_pcm(&t->a2dp.pcm, pcm.data, samples * BYTES_S24_3LE, samples) < 0) {
+					failed = 0;
+					length = 0;
+					error("FIFO write error: %s", strerror(errno));
+					break;
+				}
+			}
+
+			if (length < sample_size)
+				break;
+
+			length -= processed;
+			offset += processed;
+		}
+		offset = 0;
+		if (length == 0)
+			ffb_rewind(&bt);
+
+	}
+
+fail:
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_pop(!io.t_locked);
+fail_ffb:
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+fail_init:
 	pthread_cleanup_pop(1);
 	return NULL;
 }
@@ -2370,7 +2541,7 @@ retry_sco_write:
 			if (t->sco.mic_muted)
 				snd_pcm_scale_s16le(buffer, samples, 1, 0, 0);
 
-			if ((samples = io_thread_write_pcm(&t->sco.mic_pcm, buffer, samples)) <= 0) {
+			if ((samples = io_thread_write_pcm(&t->sco.mic_pcm, buffer, samples * sizeof(int16_t), samples)) <= 0) {
 				if (samples == -1)
 					error("FIFO write error: %s", strerror(errno));
 				if (samples == 0)
@@ -2559,6 +2730,12 @@ int io_thread_create(struct ba_transport *t) {
 		case A2DP_CODEC_MPEG24:
 			routine = io_thread_a2dp_sink_aac;
 			name = "ba-io-aac";
+			break;
+#endif
+#if ENABLE_APTX_DEC
+		case A2DP_CODEC_VENDOR_APTX:
+			routine = io_thread_a2dp_sink_aptx;
+			name = "ba-io-aptx";
 			break;
 #endif
 		default:

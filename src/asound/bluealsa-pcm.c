@@ -582,6 +582,7 @@ static int bluealsa_set_hw_constraint(struct bluealsa_pcm *pcm) {
 	};
 	static const unsigned int formats[] = {
 		SND_PCM_FORMAT_S16_LE,
+		SND_PCM_FORMAT_S24_3LE
 	};
 
 	int err;

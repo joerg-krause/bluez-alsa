@@ -378,7 +378,7 @@ unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			switch (((a2dp_aptx_t *)t->a2dp.cconfig)->channel_mode) {
 			case APTX_CHANNEL_MODE_MONO:
@@ -472,7 +472,7 @@ unsigned int ba_transport_get_sampling(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			switch (((a2dp_aptx_t *)t->a2dp.cconfig)->frequency) {
 			case APTX_SAMPLING_FREQ_16000:
@@ -520,6 +520,10 @@ unsigned int ba_transport_get_sampling(const struct ba_transport *t) {
 
 	/* the sampling frequency is unspecified */
 	return 0;
+}
+
+uint16_t ba_transport_get_format(const struct ba_transport *t) {
+	return g_dbus_transport_get_format(t->type);
 }
 
 uint16_t ba_transport_get_delay(const struct ba_transport *t) {
@@ -864,7 +868,7 @@ static int transport_release_bt_sco(struct ba_transport *t) {
 	return 0;
 }
 
-int ba_transport_release_pcm(struct ba_pcm *pcm) {
+int ba_transport_release_pcm(struct ba_transport_pcm *pcm) {
 
 	if (pcm->fd == -1)
 		return 0;

@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <alsa/asoundlib.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/hci_lib.h>
@@ -180,7 +181,7 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		case A2DP_CODEC_MPEG24:
 			return "/A2DP/MPEG24/Source";
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Source";
 #endif
@@ -208,7 +209,7 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		case A2DP_CODEC_MPEG24:
 			return "/A2DP/MPEG24/Sink";
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Sink";
 #endif
@@ -234,6 +235,20 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		return "/HSP/AudioGateway";
 	}
 	return "/";
+}
+
+uint16_t g_dbus_transport_get_format(const struct ba_transport_type type) {
+	if (type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP) {
+		switch (type.codec) {
+#if ENABLE_APTX_DEC
+		case A2DP_CODEC_VENDOR_APTX:
+			return SND_PCM_FORMAT_S24_3LE;
+#endif
+		default:
+			return SND_PCM_FORMAT_S16_LE;
+		}
+	}
+	return SND_PCM_FORMAT_S16_LE;
 }
 
 /**
