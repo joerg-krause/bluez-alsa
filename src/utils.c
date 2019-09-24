@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <alsa/asoundlib.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/hci_lib.h>
@@ -234,6 +235,16 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		return "/HSP/AudioGateway";
 	}
 	return "/";
+}
+
+uint16_t g_dbus_transport_get_pcm_format(const struct ba_transport_type type) {
+	if (type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP) {
+		switch (type.codec) {
+		default:
+			return SND_PCM_FORMAT_S16_LE;
+		}
+	}
+	return SND_PCM_FORMAT_S16_LE;
 }
 
 /**
