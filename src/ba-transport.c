@@ -378,7 +378,7 @@ unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			switch (((a2dp_aptx_t *)t->a2dp.cconfig)->channel_mode) {
 			case APTX_CHANNEL_MODE_MONO:
@@ -482,7 +482,7 @@ unsigned int ba_transport_get_sampling(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			switch (((a2dp_aptx_t *)t->a2dp.cconfig)->frequency) {
 			case APTX_SAMPLING_FREQ_16000:
