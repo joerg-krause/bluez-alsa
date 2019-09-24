@@ -84,6 +84,15 @@ AM_COND_IF([ENABLE_APTX_HD], [
 	AC_DEFINE([ENABLE_APTX_HD], [1], [Define to 1 if apt-X HD is enabled.])
 ])
 
+AC_ARG_ENABLE([aptx-dec],
+	[AS_HELP_STRING([--enable-aptx-dec], [enable apt-X deccoding support])])
+AM_CONDITIONAL([ENABLE_APTX_DEC], [test "x$enable_aptx_dec" = "xyes"])
+AM_COND_IF([ENABLE_APTX_DEC], [
+	AC_CHECK_LIB([openaptx], [aptx_init],
+		[AC_SUBST([APTX_LIBS], [-lopenaptx])], [AC_MSG_ERROR([openaptx library not found])])
+	AC_DEFINE([ENABLE_APTX_DEC], [1], [Define to 1 if apt-X decocder is enabled.])
+])
+
 AC_ARG_ENABLE([ldac],
 	[AS_HELP_STRING([--enable-ldac], [enable LDAC encoding support])])
 AM_CONDITIONAL([ENABLE_LDAC], [test "x$enable_ldac" = "xyes"])

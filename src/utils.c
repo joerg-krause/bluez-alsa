@@ -208,7 +208,7 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		case A2DP_CODEC_MPEG24:
 			return "/A2DP/MPEG24/Sink";
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Sink";
 #endif
@@ -432,7 +432,7 @@ const char *bluetooth_a2dp_codec_to_string(uint16_t codec) {
 	case A2DP_CODEC_MPEG24:
 		return "AAC";
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 	case A2DP_CODEC_VENDOR_APTX:
 		return "APT-X";
 #endif
@@ -495,7 +495,7 @@ const char *ba_transport_type_to_string(struct ba_transport_type type) {
 		case A2DP_CODEC_MPEG24:
 			return "A2DP Sink (AAC)";
 #endif
-#if ENABLE_APTX
+#if ENABLE_APTX || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
 			return "A2DP Sink (APT-X)";
 #endif
