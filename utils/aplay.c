@@ -217,11 +217,10 @@ fail:
 	return elem;
 }
 
-static int pcm_set_hw_params(snd_pcm_t *pcm, int channels, int rate,
+static int pcm_set_hw_params(snd_pcm_t *pcm, int channels, int rate, unsigned int format,
 		unsigned int *buffer_time, unsigned int *period_time, char **msg) {
 
 	const snd_pcm_access_t access = SND_PCM_ACCESS_RW_INTERLEAVED;
-	const snd_pcm_format_t format = SND_PCM_FORMAT_S16_LE;
 	snd_pcm_hw_params_t *params;
 	char buf[256];
 	int dir;
@@ -310,7 +309,7 @@ fail:
 	return err;
 }
 
-static int pcm_open(snd_pcm_t **pcm, int channels, int rate,
+static int pcm_open(snd_pcm_t **pcm, int channels, int rate, unsigned int format,
 		unsigned int *buffer_time, unsigned int *period_time, char **msg) {
 
 	snd_pcm_t *_pcm = NULL;
@@ -323,7 +322,7 @@ static int pcm_open(snd_pcm_t **pcm, int channels, int rate,
 		goto fail;
 	}
 
-	if ((err = pcm_set_hw_params(_pcm, channels, rate, buffer_time, period_time, &tmp)) != 0) {
+	if ((err = pcm_set_hw_params(_pcm, channels, rate, format, buffer_time, period_time, &tmp)) != 0) {
 		snprintf(buf, sizeof(buf), "Set HW params: %s", tmp);
 		goto fail;
 	}
@@ -435,14 +434,14 @@ static void *pcm_worker_routine(void *arg) {
 	struct pcm_worker *w = (struct pcm_worker *)arg;
 
 	size_t pcm_1s_samples = w->ba_pcm.sampling * w->ba_pcm.channels;
-	ffb_int16_t buffer = { 0 };
+	ffb_uint8_t buffer = { 0 };
 
 	/* Cancellation should be possible only in the carefully selected place
 	 * in order to prevent memory leaks and resources not being released. */
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 	pthread_cleanup_push(PTHREAD_CLEANUP(pcm_worker_routine_exit), w);
-	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_int16_free), &buffer);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_uint8_free), &buffer);
 
 	/* create buffer big enough to hold 100 ms of PCM data */
 	if (ffb_init(&buffer, pcm_1s_samples / 10) == NULL) {
@@ -466,7 +465,7 @@ static void *pcm_worker_routine(void *arg) {
 	/* These variables determine how and when the pause command will be send
 	 * to the device player. In order not to flood BT connection with AVRCP
 	 * packets, we are going to send pause command every 0.5 second. */
-	size_t pause_threshold = pcm_1s_samples / 2 * sizeof(int16_t);
+	size_t pause_threshold = snd_pcm_format_size(w->ba_pcm.format, pcm_1s_samples / 2);
 	size_t pause_counter = 0;
 	size_t pause_bytes = 0;
 
@@ -545,7 +544,7 @@ static void *pcm_worker_routine(void *arg) {
 
 		#define MIN(a,b) a < b ? a : b
 		size_t _in = MIN(pcm_max_read_len, ffb_len_in(&buffer));
-		if ((ret = read(w->ba_pcm_fd, buffer.tail, _in * sizeof(int16_t))) == -1) {
+		if ((ret = read(w->ba_pcm_fd, buffer.tail, snd_pcm_format_size(w->ba_pcm.format, _in))) == -1) {
 			if (errno == EINTR)
 				continue;
 			error("PCM FIFO read error: %s", strerror(errno));
@@ -585,7 +584,7 @@ static void *pcm_worker_routine(void *arg) {
 				continue;
 			}
 
-			if (pcm_open(&w->pcm, w->ba_pcm.channels, w->ba_pcm.sampling,
+			if (pcm_open(&w->pcm, w->ba_pcm.channels, w->ba_pcm.sampling, w->ba_pcm.format,
 						&buffer_time, &period_time, &tmp) != 0) {
 				warn("Couldn't open PCM: %s", tmp);
 				pcm_max_read_len = buffer.size;
@@ -603,11 +602,13 @@ static void *pcm_worker_routine(void *arg) {
 						"  PCM buffer time: %u us (%zu bytes)\n"
 						"  PCM period time: %u us (%zu bytes)\n"
 						"  Sampling rate: %u Hz\n"
-						"  Channels: %u\n",
+						"  Channels: %u\n"
+						"  Format: %s\n",
 						w->addr,
 						buffer_time, snd_pcm_frames_to_bytes(w->pcm, buffer_size),
 						period_time, snd_pcm_frames_to_bytes(w->pcm, period_size),
-						w->ba_pcm.sampling, w->ba_pcm.channels);
+						w->ba_pcm.sampling, w->ba_pcm.channels,
+						snd_pcm_format_name(w->ba_pcm.format));
 			}
 
 			set_alsa_playback_volume(w);
@@ -629,7 +630,7 @@ static void *pcm_worker_routine(void *arg) {
 		}
 
 		/* calculate the overall number of frames in the buffer */
-		ffb_seek(&buffer, ret / sizeof(*buffer.data));
+		ffb_seek(&buffer, ret / snd_pcm_format_size(w->ba_pcm.format, 1));
 		snd_pcm_sframes_t frames = ffb_len_out(&buffer) / w->ba_pcm.channels;
 
 		if ((frames = snd_pcm_writei(w->pcm, buffer.data, frames)) < 0)
