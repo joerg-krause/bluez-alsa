@@ -2108,11 +2108,23 @@ static void *io_thread_a2dp_sink_aptx(void *arg) {
 			continue;
 		}
 
-		if ((ret = read(io.fds[1].fd, bt.tail, ffb_len_in(&bt))) == -1) {
+		if ((ret = read(io.fds[1].fd, bt.tail, ffb_len_in(&bt) - sample_size)) == -1) {
 			debug("BT read error: %s", strerror(errno));
 			continue;
 		}
 		length += ret;
+
+		/* when mtu read size is 672 bytes, read returns with 660 bytes
+		 * in the first read and with 12 bytes in the second read.
+		 * On low powered machine after playback begins some data are
+		 * missed, propably because processing takes too long.
+		 * To workaround this issue read 660+12 bytes and the aptx
+		 * decoder is happy to process all 672 bytes.
+		 */
+		if (length < mtu_read) {
+			bt.tail += ret;
+			continue;
+		}
 
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
