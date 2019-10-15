@@ -347,6 +347,7 @@ uint16_t ba_transport_get_format(const struct ba_transport *t) {
 		switch (t->type.codec) {
 #if ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX:
+		case A2DP_CODEC_VENDOR_APTX_HD:
 			return BA_TRANSPORT_FORMAT_S24LE;
 #endif
 		}
@@ -399,7 +400,7 @@ unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX_HD:
 			switch (((a2dp_aptx_hd_t *)t->a2dp.cconfig)->aptx.channel_mode) {
 			case APTX_CHANNEL_MODE_MONO:
@@ -507,7 +508,7 @@ unsigned int ba_transport_get_sampling(const struct ba_transport *t) {
 			}
 			break;
 #endif
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX_HD:
 			switch (((a2dp_aptx_hd_t *)t->a2dp.cconfig)->aptx.frequency) {
 			case APTX_SAMPLING_FREQ_16000:

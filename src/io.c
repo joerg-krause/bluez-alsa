@@ -2211,6 +2211,206 @@ fail_init:
 	pthread_cleanup_pop(1);
 	return NULL;
 }
+
+static void *io_thread_a2dp_sink_aptx_hd(void *arg) {
+	struct ba_transport *t = (struct ba_transport *)arg;
+
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup), t);
+
+	struct io_thread_data io = {
+		.fds[0] = { t->sig_fd[0], POLLIN, 0 },
+		.fds[1] = { -1, POLLIN, 0 },
+		.t_locked = !ba_transport_pthread_cleanup_lock(t),
+	};
+
+	if (t->bt_fd == -1) {
+		error("Invalid BT socket: %d", t->bt_fd);
+		goto fail_init;
+	}
+	if (t->mtu_read <= 0) {
+		error("Invalid reading MTU: %zu", t->mtu_read);
+		goto fail_init;
+	}
+
+
+	int hd;
+	struct aptx_context *ctx;
+
+	hd = 1;
+	if ((ctx = aptx_init(hd)) == NULL) {
+		error("Couldn't initialize APTX decoder");
+		goto fail_init;
+	}
+
+	pthread_cleanup_push(PTHREAD_CLEANUP(aptx_finish), ctx);
+
+	ffb_uint8_t bt = { 0 };
+	ffb_uint8_t pcm = { 0 };
+	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_uint8_free), &bt);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ffb_uint8_free), &pcm);
+
+	const unsigned int channels = ba_transport_get_channels(t);
+	const size_t aptx_frame_size = 6;
+	const size_t aptx_pcm_samples = 4 * channels;
+	const size_t sample_size = aptx_pcm_samples * aptx_frame_size;
+	const size_t aptx_code_len = 3 * sizeof(uint8_t); /* S24_3LE */
+	const size_t mtu_read = t->mtu_read;
+
+	if (ffb_init(&pcm, aptx_pcm_samples * aptx_code_len * ((mtu_read - RTP_HEADER_LEN) / aptx_frame_size)) == NULL ||
+			ffb_init(&bt, mtu_read) == NULL) {
+		error("Couldn't create data buffers: %s", strerror(ENOMEM));
+		goto fail_ffb;
+	}
+
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup_lock), t);
+
+	ba_transport_pthread_cleanup_unlock(t);
+	io.t_locked = false;
+
+	uint16_t seq_number = -1;
+
+	size_t process_size;
+	size_t offset;
+	ssize_t processed;
+	size_t written = 0;
+	unsigned int failed = 0;
+	ssize_t length;
+
+	debug("Starting IO loop: %s", ba_transport_type_to_string(t->type));
+	for (;;) {
+		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+		/* add BT socket to the poll if transport is active */
+		io.fds[1].fd = t->state == TRANSPORT_ACTIVE ? t->bt_fd : -1;
+
+		if (poll(io.fds, ARRAYSIZE(io.fds), -1) == -1) {
+			if (errno == EINTR)
+				continue;
+			error("Transport poll error: %s", strerror(errno));
+			goto fail;
+		}
+
+		if (io.fds[0].revents & POLLIN) {
+			/* dispatch incoming event */
+			ba_transport_recv_signal(t);
+			continue;
+		}
+
+		if ((length = read(io.fds[1].fd, bt.tail, ffb_len_in(&bt))) == -1) {
+			debug("BT read error: %s", strerror(errno));
+			continue;
+		}
+		// debug("ret=%zd, length=%zd", ret, length);
+		// debug("length=%zd", length);
+
+		// debug("0x%02x 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X",
+		// 	bt.data[0], bt.data[1], bt.data[2], bt.data[3], bt.data[ 4], bt.data[ 5],
+		// 	bt.data[6], bt.data[7], bt.data[8], bt.data[9], bt.data[10], bt.data[11]
+		// 	);
+
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+
+		/* it seems that zero is never returned... */
+		if (length == 0) {
+			debug("BT socket has been closed: %d", io.fds[1].fd);
+			/* Prevent sending the release request to the BlueZ. If the socket has
+			 * been closed, it means that BlueZ has already closed the connection. */
+			close(io.fds[1].fd);
+			t->bt_fd = -1;
+			goto fail;
+		}
+
+		if (t->a2dp.pcm.fd == -1) {
+			seq_number = -1;
+			continue;
+		}
+
+		const rtp_header_t *rtp_header = (rtp_header_t *)bt.data;
+
+#if ENABLE_PAYLOADCHECK
+		if (rtp_header->paytype < 96) {
+			warn("Unsupported RTP payload type: %u", rtp_header->paytype);
+			continue;
+		}
+#endif
+
+		uint16_t _seq_number = ntohs(rtp_header->seq_number);
+		if (++seq_number != _seq_number) {
+			if (seq_number != 0)
+				warn("Missing RTP packet: %u != %u", _seq_number, seq_number);
+			seq_number = _seq_number;
+		}
+
+		offset = RTP_HEADER_LEN;
+		length -= RTP_HEADER_LEN;
+
+		while (length > 0) {
+			process_size = length;
+
+			/* When decoding previous samples failed, reset internal state, predictor and state of the synchronization parity */
+			if (failed > 0)
+				aptx_reset(ctx);
+
+			processed = aptx_decode(ctx, bt.data + offset, process_size,
+						     (unsigned char *)pcm.data, ffb_blen_in(&pcm), &written);
+			// debug("processed=%zd, written=%zd", processed, written);
+
+			if (processed > sample_size && failed > 0) {
+				debug("Synchronization successful, dropped %u samples", failed);
+				failed = 0;
+			}
+
+			/* If we have not decoded all supplied samples then decoding failed */
+			if (processed != process_size) {
+				if (failed == 0) {
+					if (length < sample_size)
+						debug("aptX decoding stopped in the middle of the sample, dropped %u samples", (unsigned int)(length - processed));
+					else
+						debug("aptX decoding failed, trying to synchronize ...");
+				}
+				if (length >= sample_size)
+					failed++;
+				else if (failed > 0)
+					failed += length;
+				if (processed <= sample_size) {
+					/* If we have not decoded at least 8 samples (with proper parity check)
+					 * drop decoded buffer and try decoding again on next byte */
+					processed = 1;
+					written = 0;
+				}
+			}
+
+			if (written > 0) {
+				const size_t samples = written / aptx_code_len;
+				if (io_thread_write_pcm(&t->a2dp.pcm, (int16_t *)pcm.data, samples * aptx_code_len, samples) < 0) {
+					failed = 0;
+					length = 0;
+					error("FIFO write error: %s", strerror(errno));
+					break;
+				}
+			}
+
+			if (length < sample_size)
+				break;
+
+			length -= processed;
+			offset += processed;
+		}
+
+	}
+
+fail:
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_pop(!io.t_locked);
+fail_ffb:
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+fail_init:
+	pthread_cleanup_pop(1);
+	return NULL;
+}
 #endif
 
 #if ENABLE_LDAC
@@ -2972,6 +3172,11 @@ int io_thread_create(struct ba_transport *t) {
 		case A2DP_CODEC_VENDOR_APTX:
 			routine = io_thread_a2dp_sink_aptx;
 			name = "ba-io-aptx";
+			break;
+
+		case A2DP_CODEC_VENDOR_APTX_HD:
+			routine = io_thread_a2dp_sink_aptx_hd;
+			name = "ba-io-aptx-hd";
 			break;
 #endif
 		default:

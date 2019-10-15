@@ -421,6 +421,7 @@ static const struct bluez_a2dp_codec *a2dp_codecs[] = {
 #endif
 #if ENABLE_APTX_DEC
 	&a2dp_codec_sink_aptx,
+	&a2dp_codec_sink_aptx_hd,
 #endif
 #if ENABLE_AAC
 	&a2dp_codec_source_aac,

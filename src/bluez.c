@@ -345,7 +345,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 	}
 #endif
 
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 	case A2DP_CODEC_VENDOR_APTX_HD: {
 
 		a2dp_aptx_hd_t *cap = capabilities;
@@ -554,7 +554,7 @@ static void bluez_endpoint_set_configuration(GDBusMethodInvocation *inv, void *u
 			}
 #endif
 
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 			case A2DP_CODEC_VENDOR_APTX_HD: {
 				a2dp_aptx_hd_t *cap = capabilities;
 				cap_chm = cap->aptx.channel_mode;

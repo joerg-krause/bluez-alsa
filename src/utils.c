@@ -212,7 +212,7 @@ const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type 
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Sink";
 #endif
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX_HD:
 			return "/A2DP/APTXHD/Sink";
 #endif
@@ -436,7 +436,7 @@ const char *bluetooth_a2dp_codec_to_string(uint16_t codec) {
 	case A2DP_CODEC_VENDOR_APTX:
 		return "APT-X";
 #endif
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 	case A2DP_CODEC_VENDOR_APTX_HD:
 		return "APT-X HD";
 #endif
@@ -499,7 +499,7 @@ const char *ba_transport_type_to_string(struct ba_transport_type type) {
 		case A2DP_CODEC_VENDOR_APTX:
 			return "A2DP Sink (APT-X)";
 #endif
-#if ENABLE_APTX_HD
+#if ENABLE_APTX_HD || ENABLE_APTX_DEC
 		case A2DP_CODEC_VENDOR_APTX_HD:
 			return "A2DP Sink (APT-X HD)";
 #endif
